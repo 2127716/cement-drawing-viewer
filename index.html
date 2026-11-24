@@ -59,7 +59,7 @@
 <body>
 <header>
   <h1>手绘逐线查尺</h1>
-  <p>点击图上的线或圆，直接读纸上毫米。滚轮或放大键缩放，拖动平移。</p>
+  <p>点线或圆，直接读纸上毫米。手机双指缩放、单指拖动。电脑可用滚轮或缩放按钮。</p>
   <nav id="tabs" aria-label="图纸"></nav>
 </header>
 <main>
@@ -111,7 +111,7 @@ const canvas = document.querySelector("#drawing");
 const ctx = canvas.getContext("2d");
 const $ = id => document.getElementById(id);
 const tau = Math.PI * 2;
-let sheet, ix, artWidth, artHeight, transforms, hit = [], chosen = 0, drag = null, framePending = false;
+let sheet, ix, artWidth, artHeight, transforms, hit = [], chosen = 0, framePending = false;
 let showContours = false, currentRecords = [];
 let width = 1, height = 1;
 const formatter = new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 2, useGrouping: false });
@@ -171,10 +171,13 @@ function fit() {
   $("regions").value="0";
   region(0,0,sheet.meta[3],sheet.meta[4]);
 }
+function limitScale(requested) {
+  const min = Math.min(width/sheet.meta[3],height/sheet.meta[4])*.35;
+  return Math.max(min,Math.min(95,requested));
+}
 function zoom(factor,x=width/2,y=height/2) {
   const old = transforms.k;
-  const min = Math.min(width/sheet.meta[3],height/sheet.meta[4])*.35;
-  const next = Math.max(min,Math.min(95,old*factor));
+  const next = limitScale(old*factor);
   const f = next/old;
   transforms = {k:next,x:x+(transforms.x-x)*f,y:y+(transforms.y-y)*f};
   render();
@@ -335,31 +338,69 @@ canvas.addEventListener("wheel",event => {
   event.preventDefault();
   zoom(event.deltaY<0 ? 1.2 : 1/1.2,...enter(event));
 },{passive:false});
+const pointers = new Map();
+let gesture = null;
+let skipTap = false;
+
+function fingerCenter(a,b) {
+  return [(a[0]+b[0])/2,(a[1]+b[1])/2];
+}
+function startGesture() {
+  const [a,b] = [...pointers.values()];
+  gesture = a ? {
+    from: b ? fingerCenter(a,b) : a,
+    spread: b ? Math.max(1,dist(a[0]-b[0],a[1]-b[1])) : 1,
+    view: {...transforms}
+  } : null;
+}
+
 canvas.addEventListener("pointerdown",event => {
-  if (event.button!==0 && event.button!==1) return;
-  const [x,y]=enter(event);
-  drag={id:event.pointerId,x,y,ox:transforms.x,oy:transforms.y,moving:event.button===1};
+  if (event.pointerType !== "touch" && event.button !== 0 && event.button !== 1) return;
+  if (!pointers.size) skipTap = event.button === 1;
+  pointers.set(event.pointerId,enter(event));
   canvas.setPointerCapture(event.pointerId);
+  if (pointers.size > 1) skipTap = true;
+  startGesture();
 });
 canvas.addEventListener("pointermove",event => {
-  const a=enter(event);
-  if (drag && drag.id === event.pointerId) {
-    if (dist(a[0]-drag.x,a[1]-drag.y)>5) drag.moving=true;
-    if (drag.moving) {
-      transforms.x=drag.ox+a[0]-drag.x; transforms.y=drag.oy+a[1]-drag.y;
+  const p=enter(event);
+  if (pointers.has(event.pointerId) && gesture) {
+    pointers.set(event.pointerId,p);
+    const [a,b]=[...pointers.values()];
+    const {from,spread,view}=gesture;
+    const center=b ? fingerCenter(a,b) : a;
+    if (b || skipTap || dist(center[0]-from[0],center[1]-from[1])>5) {
+      skipTap=true;
+      const factor=b ? dist(a[0]-b[0],a[1]-b[1])/spread : 1;
+      const k=limitScale(view.k*factor);
+      const ratio=k/view.k;
+      transforms={k,x:center[0]+(view.x-from[0])*ratio,y:center[1]+(view.y-from[1])*ratio};
       canvas.classList.add("dragging");
       render();
     }
   }
-  $("coordinate").textContent=labels(...inverse(a))+" mm";
+  $("coordinate").textContent=labels(...inverse(p))+" mm";
 });
-canvas.addEventListener("pointerup",event => {
-  if (drag && drag.id===event.pointerId && !drag.moving) pick(enter(event));
-  drag=null;
-  canvas.classList.remove("dragging");
-});
-canvas.addEventListener("pointercancel",() => { drag=null; canvas.classList.remove("dragging"); });
+
+function endPointer(event) {
+  if (!pointers.has(event.pointerId)) return;
+  const p=enter(event);
+  pointers.delete(event.pointerId);
+  if (!pointers.size && event.type==="pointerup" && !skipTap && gesture
+      && dist(p[0]-gesture.from[0],p[1]-gesture.from[1])<=5) {
+    pick(p);
+  }
+  startGesture();
+  if (!pointers.size) {
+    canvas.classList.remove("dragging");
+    if (event.pointerType==="touch") $("coordinate").textContent="";
+  }
+}
+canvas.addEventListener("pointerup",endPointer);
+canvas.addEventListener("pointercancel",endPointer);
+canvas.addEventListener("lostpointercapture",endPointer);
 canvas.addEventListener("pointerleave",() => { $("coordinate").textContent=""; });
+
 $("anchor").onchange=present;
 $("plus").onclick=() => zoom(1.5);
 $("minus").onclick=() => zoom(1/1.5);
